@@ -2,6 +2,17 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
+
+class AbsoluteValue(layers.Layer):
+    """Capa personalizada para calcular el valor absoluto de manera serializable."""
+    
+    def call(self, x):
+        return tf.abs(x)
+    
+    def get_config(self):
+        return super().get_config()
+
+
 class Neuron():
     @staticmethod
     def dense_classifier(input_dim=12):
@@ -218,8 +229,8 @@ class Neuron():
         diff = layers.Subtract()([src_combined, tgt_combined])
         product = layers.Multiply()([src_combined, tgt_combined])
 
-        # Manhattan distance
-        abs_diff = layers.Lambda(lambda x: tf.abs(x))(diff)
+        # Manhattan distance usando la capa personalizada serializable
+        abs_diff = AbsoluteValue()(diff)
 
         # Concatenar todas las representaciones
         merged = layers.Concatenate()([

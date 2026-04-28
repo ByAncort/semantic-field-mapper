@@ -1,8 +1,9 @@
 import json
 import random
-
+from sklearn.model_selection import train_test_split
 from tensorflow.python.keras.utils.version_utils import training
 import src.db.config_mongodb as config_mongodb
+from pathlib import Path
 
 _db = config_mongodb.SemanticConfigMongoDb()
 
@@ -132,17 +133,23 @@ class generadorDatos:
 
         return list(set(variantes))[:num_variaciones * 2]
 
-def cargar_pares(filepath="../data_training/datos_entrenamiento/training_data_23-03.jsonl"):
+def cargar_pares(filepath=None):
+    if filepath is None:
+        current_dir = Path(__file__).parent
+        project_root = current_dir.parent.parent
+        filepath = project_root / "src" / "data_training" / "datos_entrenamiento" / "training_data_23-03.jsonl"
+    filepath = Path(filepath)
+    if not filepath.exists():
+        raise FileNotFoundError(f"No se encontró el archivo: {filepath}")
     with open(filepath, encoding="utf-8") as f:
         return [json.loads(line) for line in f]
 
-def generacion_datos():
-    generador = generadorDatos()
 
+def generacion_datos(test_size=0.2, random_state=42):
+    generador = generadorDatos()
     datos_ent = []
 
     # training_data = datos_base() + _fn() + _fp() + distintos() + similares()
-
     training_data = cargar_pares()
     datos = _db.cargar_dataset(
         nombre="dataset_alpha",
@@ -151,7 +158,6 @@ def generacion_datos():
     )
 
     training_data = [(p["field_a"], p["field_b"], p["match"]) for p in datos]
-
     datos_ent.extend(training_data)
 
     conceptos_clave = ['nombre', 'email', 'telefono', 'rfc', 'uuid', 'direccion', 'cp']
@@ -175,12 +181,29 @@ def generacion_datos():
     max_negativos = len(positivos) * 2
     random.shuffle(pares_negativos)
     pares_negativos = pares_negativos[:max_negativos]
-
     datos_ent.extend(pares_negativos)
     datos_ent = list(set(datos_ent))
 
     positivos_final = sum(1 for d in datos_ent if d[2] == 1)
     negativos_final = sum(1 for d in datos_ent if d[2] == 0)
-    print(f"✅ Dataset: {len(datos_ent)} pares | Positivos: {positivos_final} | Negativos: {negativos_final}")
+    print(f"✅ Dataset total: {len(datos_ent)} pares | Positivos: {positivos_final} | Negativos: {negativos_final}")
 
-    return datos_ent
+    # DIVISIÓN 80% ENTRENAMIENTO / 20% PRUEBA
+    # Separar características (X) y etiquetas (y)
+    X = [(c1, c2) for c1, c2, _ in datos_ent]
+    y = [match for _, _, match in datos_ent]
+
+    # División estratificada para mantener proporción de clases
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=y  # Mantiene la misma proporción de positivos/negativos
+    )
+
+    # Reconstruir datasets en formato original
+    train_data = [(c1, c2, label) for (c1, c2), label in zip(X_train, y_train)]
+    test_data = [(c1, c2, label) for (c1, c2), label in zip(X_test, y_test)]
+
+
+    return train_data, test_data

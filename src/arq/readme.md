@@ -1,3 +1,7 @@
+# Semantic Model Architecture - Documentación Técnica
+Modelo de red neuronal profunda para **similitud semántica de campos** que integra tres modalidades de datos mediante una arquitectura de **múltiples ramas con pesos compartidos** (Siamese Network + Multi-Modal Fusion).
+
+
 ```mermaid
 graph TB
     subgraph "INPUTS (7 entradas)"
@@ -111,3 +115,26 @@ graph TB
     class DIFF,PROD,ABS_DIFF,MERGED comparisonStyle
     class SIM,TYPE,CONF outputStyle
 ```
+Input (7 tensores) → 3 Ramas Paralelas → Fusión → Comparación → 3 Outputs
+## Tensor de Entrada
+
+### Dimensionamiento
+
+| # | Nombre | Shape | Tipo | Descripción |
+|---|--------|-------|------|-------------|
+| 1 | `src_name` | `(batch, 20)` | `int32` | Secuencia tokenizada del nombre del campo origen |
+| 2 | `src_value` | `(batch, 20)` | `int32` | Secuencia tokenizada del valor del campo origen |
+| 3 | `tgt_name` | `(batch, 20)` | `int32` | Secuencia tokenizada del nombre del campo destino |
+| 4 | `tgt_value` | `(batch, 20)` | `int32` | Secuencia tokenizada del valor del campo destino |
+| 5 | `src_semantic` | `(batch, 8)` | `float32` | Vector de features semánticas del origen |
+| 6 | `tgt_semantic` | `(batch, 8)` | `float32` | Vector de features semánticas del destino |
+| 7 | `context` | `(batch, 5)` | `float32` | Vector de contexto JSON |
+
+
+### Salidas
+
+| Salida | Capa | Función | Shape | Rango | Interpretación |
+|--------|------|---------|-------|-------|----------------|
+| `similarity_score` | `Dense(1)` | `sigmoid` | `(batch, 1)` | [0,1] | Probabilidad de match |
+| `match_type` | `Dense(5)` | `softmax` | `(batch, 5)` | Σ=1 | Distribución sobre 5 clases |
+| `confidence` | `Dense(1)` | `sigmoid` | `(batch, 1)` | [0,1] | Certeza de la predicción |
