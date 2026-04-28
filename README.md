@@ -148,3 +148,56 @@ Incluye la licencia del proyecto aquí (no proporcionada en el repo). Añade tam
 Contacto
 --------
 Para preguntas técnicas o integración: abrir un issue en GitHub o contactar al autor del repositorio.
+
+Flujo técnico y técnicas utilizadas
+----------------------------------
+La arquitectura general combina generación de datos, extracción de features, entrenamiento de modelos y un ensemble para inferencia. A continuación se describe el flujo y las técnicas principales.
+
+- Fuentes de datos: ejemplos etiquetados (campo_1, campo_2, etiqueta) generados por `src/data_training/gen_datos.py` o datasets reales cargados desde la capa DB (`src/db/config_mongodb.py`).
+- Generación de dataset: normalización, particionado (train/val/test), y opcional data augmentation para hard negatives/positives.
+- Tokenización: reglas deterministas que preservan tokens diferenciadores (reemplazo de separadores, separación camelCase/ dígitos) y eliminación de stopwords del sistema.
+- Features clásicos: token_jaccard, sequence similarity, longitudes, counts, penalizaciones, match_semantico y (opcional) similitud de embeddings.
+- Features semánticos: 8 features por nombre de campo (identidad, diferenciadores, grupo semántico, fuerza, longitud normalizada, vowel_ratio, special_chars, case pattern).
+- Contexto JSON: 5 features (profundidad, is_array, is_object, tipo de padre, posición relativa).
+- Modelos:
+  - Classic NN: red entrenada sobre vector de features (scaler + keras model). Guardado como .h5 + scaler.pkl.
+  - Semantic model: arquitectura siamesa que consume tokenizaciones + features semánticas + contexto. Puede incluir LSTM/Atención.
+  - Embeddings: sentence-transformers para similitud coseno (opcional, mejora robustez cross-idioma).
+- Ensemble: combina score_nn (modelo clásico o fallback), score_emb (embeddings) y score_rules (reglas determinísticas) con pesos configurables. Umbral configurable para decidir match/no-match.
+- Evaluación: métricas estándar (accuracy, precision, recall, F1). Identificación de hard negatives/positives para mejorar dataset.
+
+Diagrama (Mermaid)
+-------------------
+Aquí tienes un diagrama en formato Mermaid que representa el flujo de datos y componentes principales. Puedes renderizarlo en cualquier visor compatible con Mermaid (GitHub, VSCode Markdown Preview con extensión, etc.).
+
+```mermaid
+flowchart LR
+  A[Fuentes de datos] --> B[Generación de datasets]
+  B --> C[Extracción de features]
+  C --> C1[Tokenización + Features clásicos]
+  C --> C2[Features semánticos + Contexto JSON]
+  C1 --> D[Entrenamiento: Classic NN (cross_validator)]
+  C2 --> E[Entrenamiento: Semantic Model (Siamese LSTM + Attention)]
+  D --> F[Modelo clásico (.h5) + scaler.pkl]
+  E --> G[Modelo semántico (.h5)]
+  C --> I[Sentence-transformers (embeddings)]
+  F --> H[EnsemblePredictor]
+  G --> H
+  I --> H
+  H --> J[Inferencia: predecir / predecir_objetos]
+  J --> K[Outputs: score_final, desglose, tokens, métricas]
+  D --> L[Evaluación: precision/recall/F1]
+  E --> L
+  L --> M[Identificar hard positives / hard negatives]
+
+  style A fill:#f9f,stroke:#333,stroke-width:1px
+  style H fill:#bbf,stroke:#333,stroke-width:1px
+  style J fill:#bfb,stroke:#333,stroke-width:1px
+```
+
+Leyenda y notas
+---------------
+- Tokenización: se aplican reglas específicas para conservar tokens relevantes (underscore replacement, separación camelCase, separación letra-número) y se filtran stopwords.
+- Scaler: indispensable para que la red neuronal reciba features normalizados; guardado con joblib.
+- Fallbacks: cuando el modelo semantic (multisalida) no es compatible con el ensemble, el pipeline usa score_rules como fallback en el componente _score_nn.
+- Ajustes de ensemble: los pesos por defecto son (weight_nn=0.45, weight_emb=0.30, weight_rules=0.25) y el umbral por defecto es 0.40; estos valores son configurables en EnsembleConfig.
