@@ -239,7 +239,7 @@ def model_validator(X_train, y_train, X_val, y_val):
     callbacks = [
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
-            patience=20,
+            patience=50,
             restore_best_weights=True,
             verbose=1,
         ),
