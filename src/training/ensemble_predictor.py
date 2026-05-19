@@ -25,7 +25,7 @@ from src.training.cross_validator import (
     extraer_caracteristicas,
     tokenizar,
 )
-from src.config import MODEL_PATH, SCALER_PATH
+from src.config import MODEL_PATH, SCALER_PATH, TOKENIZER_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -34,31 +34,84 @@ logger = logging.getLogger(__name__)
 # SEÑALES INDIVIDUALES
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _score_nn(modelo, scaler, campo1: str, campo2: str) -> float:
+def _score_semantic(modelo, campo1: str, campo2: str) -> float:
+    """
+    Inferencia con el semantic_model (LSTM + Attention + features semánticos).
+    Prepara los 7 inputs que espera el modelo multi-output.
+    Usa el tokenizer guardado durante el entrenamiento si existe.
+    """
+    from src.training.semantic_features_extractor import (
+        extraer_features_semanticos, create_default_context
+    )
+    from src.training.cross_validator import SimpleTokenizer
+    import json
+
+    if not hasattr(_score_semantic, '_tokenizer') or _score_semantic._tokenizer is None:
+        # Intentar cargar tokenizer guardado
+        if TOKENIZER_PATH.exists():
+            with open(TOKENIZER_PATH, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            tokenizer = SimpleTokenizer(
+                vocab_size=state.get('vocab_size', 10000),
+                max_len=state.get('max_len', 20)
+            )
+            tokenizer.word2idx = {str(k): int(v) for k, v in state['word2idx'].items()}
+            tokenizer.idx2word = {int(v): str(k) for k, v in state['word2idx'].items()}
+            _score_semantic._tokenizer = tokenizer
+            logger.info(f"✅ Tokenizer cargado desde {TOKENIZER_PATH.resolve()}")
+        else:
+            logger.warning(f"No se encontró tokenizer guardado en {TOKENIZER_PATH}. Usando tokenizer por defecto.")
+            _score_semantic._tokenizer = SimpleTokenizer(vocab_size=10000, max_len=20)
+    tokenizer = _score_semantic._tokenizer
+
+    src_idx = np.array([tokenizer.tokenize_to_indices(campo1)])
+    tgt_idx = np.array([tokenizer.tokenize_to_indices(campo2)])
+
+    src_sem = np.array([extraer_features_semanticos(campo1)], dtype=np.float32)
+    tgt_sem = np.array([extraer_features_semanticos(campo2)], dtype=np.float32)
+
+    ctx = create_default_context().to_features()
+    ctx_batch = np.array([ctx], dtype=np.float32)
+
+    inputs = {
+        'src_name': src_idx,
+        'src_value': src_idx,
+        'tgt_name': tgt_idx,
+        'tgt_value': tgt_idx,
+        'src_semantic': src_sem,
+        'tgt_semantic': tgt_sem,
+        'context': ctx_batch,
+    }
+
+    outputs = modelo.predict(inputs, verbose=0)
+    if isinstance(outputs, dict):
+        return float(outputs['similarity_score'][0][0])
+    if isinstance(outputs, (list, tuple)):
+        return float(outputs[0][0][0])
+    return float(outputs[0][0])
+
+def _score_nn(modelo, scaler, campo1: str, campo2: str):
     """
     Probabilidad sigmoid de la red neuronal.
-    Soporta el modelo antiguo (single output).
-    Para semantic_model, usa reglas como fallback.
+    Soporta modelo clásico (single-output dense) y semantic_model (multi-output).
+    Retorna: (score, source) donde source es 'nn', 'semantic' o 'rules_fallback'.
     """
-    # Detectar tipo de modelo por número de outputs
     if hasattr(modelo, 'outputs') and len(modelo.outputs) > 1:
-        # Es el semantic_model - no puede usarse directamente en ensemble sin proper tokenization
-        # Usar score_rules como fallback
-        logger.debug(f"semantic_model detectado, usando fallback (score_rules) para: {campo1} ↔ {campo2}")
-        return _score_rules(campo1, campo2)
-    
-    else:
-        # Modelo antiguo (single output)
-        features = extraer_caracteristicas(campo1, campo2, use_embeddings=True)
-        
-        # Si scaler es None, usar features directamente
-        if scaler is not None:
-            features_scaled = scaler.transform([features])
+        if TOKENIZER_PATH.exists():
+            try:
+                score = _score_semantic(modelo, campo1, campo2)
+                return score, "semantic"
+            except Exception as e:
+                logger.debug(f"semantic_model falló ({e}), usando fallback rules")
         else:
-            features_scaled = [features]
-        
-        return float(modelo.predict(features_scaled, verbose=0)[0][0])
+            logger.debug(f"semantic_model sin tokenizer guardado, usando reglas")
+        return _score_rules(campo1, campo2), "rules_fallback"
 
+    # Modelo antiguo (single output)
+    features = extraer_caracteristicas(campo1, campo2, use_embeddings=True)
+    if scaler is not None:
+        features = scaler.transform([features])
+    return float(modelo.predict(features, verbose=0)[0][0]), "nn"
 
 def _score_emb(campo1: str, campo2: str) -> float:
     """
@@ -225,18 +278,38 @@ class EnsemblePredictor:
         """
         cfg = self.config
 
-        s_nn    = _score_nn(self.modelo, self.scaler, campo1, campo2)
-        s_emb   = _score_emb(campo1, campo2)
+        s_nn, source = _score_nn(self.modelo, self.scaler, campo1, campo2)
+        s_emb = _score_emb(campo1, campo2)
         s_rules = _score_rules(campo1, campo2)
+        if source == "semantic":
+            weight_nn = 0.55
+            weight_emb = 0.25
+            weight_rules = 0.20
+        elif source == "rules_fallback":
+            weight_nn = 0.0
+            weight_rules = 0.7
+            weight_emb = 0.3
+        else:
+            weight_nn = cfg.weight_nn
+            weight_emb = cfg.weight_emb
+            weight_rules = cfg.weight_rules
 
-        score_final = float(np.clip(
-            cfg.weight_nn * s_nn + cfg.weight_emb * s_emb + cfg.weight_rules * s_rules,
-            0.0, 1.0,
-        ))
+        score_final = np.clip(
+            weight_nn * s_nn +
+            weight_emb * s_emb +
+            weight_rules * s_rules,
+            0.0, 1.0
+        )
+        if s_rules > 0.8:
+            score_final = max(score_final, 0.9)
 
         t1 = tokenizar(campo1)
         t2 = tokenizar(campo2)
+        if "id" in t1 and "id" in t2:
+            score_final = max(score_final, 0.85)
 
+        if "correo" in t1 and "correo" in t2:
+            score_final = max(score_final, 0.85)
         return {
             "campo1":          campo1,
             "campo2":          campo2,
@@ -375,7 +448,6 @@ class EnsemblePredictor:
 
 if __name__ == "__main__":
     import json
-    # logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     predictor = EnsemblePredictor.from_paths()
 

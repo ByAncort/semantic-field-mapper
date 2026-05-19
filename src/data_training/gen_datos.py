@@ -4,6 +4,8 @@ from sklearn.model_selection import train_test_split
 from tensorflow.python.keras.utils.version_utils import training
 import src.db.config_mongodb as config_mongodb
 from pathlib import Path
+import logging
+logger = logging.getLogger(__name__)
 
 _db = config_mongodb.SemanticConfigMongoDb()
 
@@ -149,15 +151,20 @@ def generacion_datos(test_size=0.2, random_state=42):
     generador = generadorDatos()
     datos_ent = []
 
-    # training_data = datos_base() + _fn() + _fp() + distintos() + similares()
-    training_data = cargar_pares()
-    datos = _db.cargar_dataset(
-        nombre="dataset_alpha",
-        version="1.1",
-        return_dicts=True
-    )
+    # Intentar cargar desde MongoDB; si falla, cargar desde archivos
+    try:
+        datos = _db.cargar_dataset(
+            nombre="dataset_alpha",
+            version="1.1",
+            return_dicts=True
+        )
+        training_data = [(p["field_a"], p["field_b"], p["match"]) for p in datos]
+        logger.info(f"Cargados {len(training_data)} pares desde MongoDB")
+    except Exception:
+        training_data = cargar_pares()
+        training_data = [(p["field_a"], p["field_b"], p["match"]) for p in training_data]
+        logger.info(f"Cargados {len(training_data)} pares desde archivos JSONL")
 
-    training_data = [(p["field_a"], p["field_b"], p["match"]) for p in datos]
     datos_ent.extend(training_data)
 
     conceptos_clave = ['nombre', 'email', 'telefono', 'rfc', 'uuid', 'direccion', 'cp']
@@ -186,7 +193,7 @@ def generacion_datos(test_size=0.2, random_state=42):
 
     positivos_final = sum(1 for d in datos_ent if d[2] == 1)
     negativos_final = sum(1 for d in datos_ent if d[2] == 0)
-    print(f"✅ Dataset total: {len(datos_ent)} pares | Positivos: {positivos_final} | Negativos: {negativos_final}")
+    print(f"[OK] Dataset total: {len(datos_ent)} pares | Positivos: {positivos_final} | Negativos: {negativos_final}")
 
     # DIVISIÓN 80% ENTRENAMIENTO / 20% PRUEBA
     # Separar características (X) y etiquetas (y)

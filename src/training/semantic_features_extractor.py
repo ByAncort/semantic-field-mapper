@@ -62,22 +62,25 @@ def detect_case_pattern(texto: str) -> int:
     """
     if '_' in texto:
         return 0
-    elif texto[0].isupper():
+    if len(texto) == 1:
+        return 3 if texto.isupper() else 0
+    if texto.isupper():
+        return 3
+    if texto[0].isupper():
         return 2 if any(c.islower() for c in texto) else 3
-    elif any(c.isupper() for c in texto[1:]):
+    if any(c.isupper() for c in texto[1:]):
         return 1
-    else:
-        return 0
+    return 0
 
 
 def semantic_group_to_id(group_name: str) -> float:
     """
     Convierte un nombre de grupo semántico (string) a un ID numérico.
     Usa hash para generar un ID consistente en el rango [0, 1000].
-    
+
     Args:
         group_name: Nombre del grupo semántico (ej: 'email', 'date', 'identifier')
-    
+
     Returns:
         float: ID numérico normalizado en el rango [0, 1000]
     """
@@ -95,7 +98,7 @@ def semantic_group_to_id(group_name: str) -> float:
 def extraer_features_semanticos(nombre_campo: str) -> np.ndarray:
     """
     Extrae 8 features semánticos de un nombre de campo.
-    
+
     Returns:
         array de shape (8,) con los siguientes features:
         [0] has_identity_token: ¿Contiene token de identidad? [0, 1]
@@ -108,38 +111,51 @@ def extraer_features_semanticos(nombre_campo: str) -> np.ndarray:
         [7] case_pattern: Patrón de mayúsculas [0, 3]
     """
     tokens = tokenizar(nombre_campo)
-    
+
     # F0: ¿Tiene token de identidad?
     has_identity = 1.0 if (tokens & TOKENS_IDENTIDAD) else 0.0
-    
+
     # F1: ¿Tiene token diferenciador?
     has_differentiator = 1.0 if (tokens & TOKENS_DIFERENCIADORES) else 0.0
-    
+
     # F2 y F3: Grupo semántico
     semantic_groups = {INDICE_SEMANTICO.get(t) for t in tokens if t in INDICE_SEMANTICO}
     if semantic_groups and None not in semantic_groups:
         # Tomar el primer grupo encontrado y convertir a ID numérico
         group_name = next(iter(semantic_groups))  # Tomar el primer grupo
-        group_id = semantic_group_to_id(group_name)
-        group_strength = 0.8  # Confianza por defecto cuando hay grupo
+        # group_id = semantic_group_to_id(group_name)
+        GROUP_MAP = {
+            "email": 1,
+            "customer_id": 2,
+            "postal_code": 3,
+            "name": 4,
+            "date": 5
+        }
+
+        group_id = float(GROUP_MAP.get(group_name, 0))
+        group_strength = 0.8  # Confianza por defecto
+        # cuando hay grupo
     else:
         group_id = 0.0
         group_strength = 0.0
-    
+
     # F4: Longitud normalizada (logarítmica, capped at 50)
     normalized_length = min(len(nombre_campo) / 50.0, 1.0)
-    
+
     # F5: Proporción de vocales
     vocales = sum(1 for c in nombre_campo.lower() if c in 'aeiouáéíóú')
     vowel_ratio = vocales / max(len(nombre_campo), 1)
-    
+
     # F6: Caracteres especiales normalizados
     special_chars = sum(1 for c in nombre_campo if not c.isalnum() and c != '_')
     special_ratio = min(special_chars / max(len(nombre_campo), 1), 1.0)
-    
+
     # F7: Patrón de mayúsculas
     case_pattern = float(detect_case_pattern(nombre_campo))
-    
+
+    shared_tokens = len(tokens & TOKENS_IDENTIDAD)
+    shared_ratio = shared_tokens / max(len(tokens), 1)
+
     return np.array([
         has_identity,
         has_differentiator,
@@ -148,14 +164,14 @@ def extraer_features_semanticos(nombre_campo: str) -> np.ndarray:
         normalized_length,
         vowel_ratio,
         special_ratio,
-        case_pattern
+        case_pattern,
+        shared_ratio
     ], dtype=np.float32)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTRACTION: CONTEXT FEATURES (5 features)
 # ─────────────────────────────────────────────────────────────────────────────
-
 class JSONContext:
     """
     Información de contexto de un campo en la estructura JSON.
@@ -175,11 +191,11 @@ class JSONContext:
         self.parent_type = parent_type  # root, response, data, nested, otros
         self.position_in_parent = position_in_parent
         self.total_siblings = total_siblings
-    
+
     def to_features(self) -> np.ndarray:
         """
         Convierte el contexto a array de 5 features.
-        
+
         Returns:
             array de shape (5,):
             [0] depth: Profundidad normalizada [0, 1] (capped at 10)
@@ -195,17 +211,17 @@ class JSONContext:
             "nested": 3,
         }
         parent_id = float(parent_type_map.get(self.parent_type, 4))
-        
+
         # Profundidad normalizada
         normalized_depth = min(self.depth / 10.0, 1.0)
-        
+
         # Posición relativa
         position_ratio = (
             self.position_in_parent / max(self.total_siblings - 1, 1)
             if self.total_siblings > 1
             else 0.5
         )
-        
+
         return np.array([
             normalized_depth,
             1.0 if self.is_array else 0.0,
@@ -242,7 +258,7 @@ def preparar_par_campos(
 ) -> dict:
     """
     Prepara un par de campos para pasar al semantic_model.
-    
+
     Args:
         src_name: Nombre del campo origen
         src_value: Valor del campo origen (como string)
@@ -251,7 +267,7 @@ def preparar_par_campos(
         src_context: Contexto JSON del campo origen
         tgt_context: Contexto JSON del campo destino
         tokenizer_fn: Función de tokenización (si None, usa default)
-    
+
     Returns:
         dict con keys:
         {
@@ -269,18 +285,18 @@ def preparar_par_campos(
         src_context = create_default_context()
     if tgt_context is None:
         tgt_context = create_default_context()
-    
+
     # Features semánticos
     src_semantic = extraer_features_semanticos(src_name)
     tgt_semantic = extraer_features_semanticos(tgt_name)
-    
+
     # Features de contexto (usar contexto origen; en futuro podría combinarse)
     context_features = src_context.to_features()
-    
+
     # Para tokenización de texto, aquí necesitarías una función que convierta
     # texto a índices numéricos. Por ahora, retornamos placeholder.
     # En la integración real, esto usará el tokenizer del modelo.
-    
+
     return {
         'src_name': src_name,
         'src_value': src_value,
@@ -300,7 +316,7 @@ def preparar_par_campos(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    
+
     casos = [
         "rfc",
         "email",
@@ -311,11 +327,11 @@ if __name__ == "__main__":
         "CURP_MEX",
         "uuid_primary",
     ]
-    
+
     print("\n📊 FEATURES SEMÁNTICOS EXTRAÍDOS\n")
     print(f"{'Campo':25} {'Identity':10} {'Differ':10} {'Group':8} {'Length':8} {'Vowels':8} {'Special':8} {'Case':6}")
     print("─" * 93)
-    
+
     for campo in casos:
         features = extraer_features_semanticos(campo)
         print(
@@ -323,7 +339,7 @@ if __name__ == "__main__":
             f"{features[2]:.1f}      {features[4]:.2f}     {features[5]:.2f}     "
             f"{features[6]:.2f}     {features[7]:.0f}"
         )
-    
+
     print("\n📍 CONTEXTO JSON (ejemplo)\n")
     ctx = JSONContext(depth=2, is_object=True, parent_type="data", position_in_parent=3, total_siblings=10)
     ctx_features = ctx.to_features()

@@ -39,7 +39,7 @@ class Neuron():
             layers.Dense(1, activation='sigmoid', name='is_match')
         ])
         modelo.compile(
-            optimizer=keras.optimizers.Adam(learning_rate=0.001),
+            optimizer=keras.optimizers.Adam(learning_rate=0.003),
             loss='binary_crossentropy',
             metrics=['accuracy', tf.keras.metrics.Precision(), tf.keras.metrics.Recall()]
         )
@@ -142,7 +142,7 @@ class Neuron():
         return deep_model
 
     @staticmethod
-    def semantic_model(vocab_size=10000, embed_dim=64, max_len=20, semantic_features=8):
+    def semantic_model(vocab_size=10000, embed_dim=64, max_len=20, semantic_features=9):
         """
         Modelo Semántico Avanzado: Integra análisis semántico con arquitectura Siamesa.
 

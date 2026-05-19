@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import re
 from difflib import SequenceMatcher
 from functools import lru_cache
@@ -15,7 +14,7 @@ from sklearn.utils import compute_class_weight
 from tensorflow import keras
 
 import src.db.config_mongodb as db_setup
-from src.config import MODEL_PATH, SCALER_PATH
+from src.config import MODEL_PATH, SCALER_PATH, TOKENIZER_PATH
 from src.arq.neuron import Neuron
 
 logger = logging.getLogger(__name__)
@@ -201,20 +200,6 @@ def preparar_datos(training_data, use_embeddings: bool = True):
         y.append(int(etiqueta))
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
-def preparar_datos(training_data, use_embeddings: bool = True):
-    """
-    Convierte la lista de (texto1, texto2, etiqueta) en arrays numpy.
-    use_embeddings controla si se incluye F12.
-    """
-    X, y = [], []
-    total = len(training_data)
-    for i, (texto1, texto2, etiqueta) in enumerate(training_data):
-        if i % 50 == 0:
-            logger.info(f"  Extrayendo features {i}/{total}…")
-        X.append(extraer_caracteristicas(texto1, texto2, use_embeddings=use_embeddings))
-        y.append(int(etiqueta))
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
-
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRENAMIENTO
 # ─────────────────────────────────────────────────────────────────────────────
@@ -254,7 +239,7 @@ def model_validator(X_train, y_train, X_val, y_val):
 
     crear_directorio_si_no_existe(SCALER_PATH)
     joblib.dump(scaler, SCALER_PATH)
-    logger.info(f"Scaler guardado en: {os.path.abspath(SCALER_PATH)}")
+    logger.info(f"Scaler guardado en: {SCALER_PATH.resolve()}")
 
     class_weights     = compute_class_weight("balanced", classes=np.unique(y_train), y=y_train)
     class_weight_dict = dict(enumerate(class_weights))
@@ -270,7 +255,7 @@ def model_validator(X_train, y_train, X_val, y_val):
         verbose=1,
     )
     modelo.save(MODEL_PATH)
-    logger.info(f"Modelo guardado en: {os.path.abspath(MODEL_PATH)}")
+    logger.info(f"Modelo guardado en: {MODEL_PATH.resolve()}")
     return modelo, historia, scaler
 
 
@@ -292,18 +277,18 @@ class SimpleTokenizer:
         self._build_vocab_from_config()
 
     def _build_vocab_from_config(self):
-        """Construye vocabulario a partir de tokens conocidos."""
+        """Construye vocabulario a partir de tokens conocidos (orden determinístico)."""
         idx = 1  # 0 es para padding
 
-        # Agregar tokens diferenciadores
-        for token in list(TOKENS_DIFERENCIADORES)[:100]:
+        # Agregar tokens diferenciadores (ordenados para determinismo)
+        for token in sorted(TOKENS_DIFERENCIADORES)[:100]:
             if idx < self.vocab_size:
                 self.word2idx[token] = idx
                 self.idx2word[idx] = token
                 idx += 1
 
-        # Agregar tokens de identidad
-        for token in list(TOKENS_IDENTIDAD)[:100]:
+        # Agregar tokens de identidad (ordenados para determinismo)
+        for token in sorted(TOKENS_IDENTIDAD)[:100]:
             if idx < self.vocab_size:
                 self.word2idx[token] = idx
                 self.idx2word[idx] = token
@@ -311,23 +296,29 @@ class SimpleTokenizer:
 
         logger.debug(f"Vocabulario inicializado con {idx - 1} tokens conocidos")
 
+    def _deterministic_hash(self, token: str) -> int:
+        """Hash determinístico (no depende de PYTHONHASHSEED)."""
+        h = 0
+        for c in token:
+            h = (h * 31 + ord(c)) & 0xFFFFFFFF
+        return h
+
     def tokenize_to_indices(self, texto: str) -> list[int]:
         """
-        Convierte texto a lista de índices.
-        Tokens desconocidos se asignan a índices pseudo-aleatorios.
+        Convierte texto a lista de índices (determinístico entre sesiones).
+        Tokens desconocidos se asignan a índices basados en hash determinístico.
         """
         tokens = tokenizar(texto)
         indices = []
+        vocab_range = self.vocab_size - len(self.word2idx)
 
         for token in sorted(tokens)[:self.max_len]:
             if token in self.word2idx:
                 indices.append(self.word2idx[token])
             else:
-                # Hash simple para consistencia
-                idx = (hash(token) % (self.vocab_size - len(self.word2idx))) + len(self.word2idx)
+                idx = (self._deterministic_hash(token) % vocab_range) + len(self.word2idx)
                 indices.append(idx)
 
-        # Padding con ceros
         while len(indices) < self.max_len:
             indices.append(0)
 
@@ -356,6 +347,17 @@ def preparar_datos_semantico(training_data, use_tokenizer=True):
     )
 
     tokenizer = SimpleTokenizer(vocab_size=10000, max_len=20) if use_tokenizer else None
+
+    # Guardar tokenizer state para inferencia reproducible
+    if tokenizer is not None:
+        import json
+        with open(TOKENIZER_PATH, 'w', encoding='utf-8') as f:
+            json.dump({
+                'word2idx': tokenizer.word2idx,
+                'vocab_size': tokenizer.vocab_size,
+                'max_len': tokenizer.max_len,
+            }, f, ensure_ascii=False)
+        logger.info(f"✅ Tokenizer guardado en: {TOKENIZER_PATH.resolve()}")
 
     src_names_seq = []
     src_values_seq = []
@@ -442,7 +444,7 @@ def model_validator_semantic(X_train, y_train, X_val, y_val):
         vocab_size=10000,
         embed_dim=64,
         max_len=20,
-        semantic_features=8
+        semantic_features=9
     )
 
     logger.info("Semantic Model Summary:")
@@ -454,7 +456,8 @@ def model_validator_semantic(X_train, y_train, X_val, y_val):
     # Convertir etiquetas binarias a targets multi-output
     y_similarity = y_train.reshape(-1, 1)  # [0, 1]
     y_match_type = y_train.astype(np.int32)  # Simplificar: 0=no_match, 1=exacto
-    y_confidence = np.ones_like(y_train).reshape(-1, 1) * 0.9  # Confianza inicial alta
+    # Confianza: 0.85 para matches (incertidumbre moderada), 0.95 para no-matches
+    y_confidence = np.where(y_train == 1, 0.85, 0.95).reshape(-1, 1)
 
     y_train_dict = {
         'similarity_score': y_similarity,
@@ -465,7 +468,7 @@ def model_validator_semantic(X_train, y_train, X_val, y_val):
     # Validación
     y_val_similarity = y_val.reshape(-1, 1)
     y_val_match_type = y_val.astype(np.int32)
-    y_val_confidence = np.ones_like(y_val).reshape(-1, 1) * 0.9
+    y_val_confidence = np.where(y_val == 1, 0.85, 0.95).reshape(-1, 1)
 
     y_val_dict = {
         'similarity_score': y_val_similarity,
@@ -492,7 +495,7 @@ def model_validator_semantic(X_train, y_train, X_val, y_val):
     # Guardar scaler (aunque no se usa en semantic_model)
     crear_directorio_si_no_existe(SCALER_PATH)
     joblib.dump(None, SCALER_PATH)
-    logger.info(f"✅ Scaler path preparado: {os.path.abspath(SCALER_PATH)}")
+    logger.info(f"✅ Scaler path preparado: {SCALER_PATH.resolve()}")
 
     # Nota: No se puede usar class_weight con multi-output models en Keras
     # El modelo tiene 3 outputs, por lo que el balanceo de clases se maneja en loss functions
@@ -509,7 +512,7 @@ def model_validator_semantic(X_train, y_train, X_val, y_val):
     )
 
     modelo.save(MODEL_PATH)
-    logger.info(f"✅ Semantic model guardado en: {os.path.abspath(MODEL_PATH)}")
+    logger.info(f"✅ Semantic model guardado en: {MODEL_PATH.resolve()}")
 
     return modelo, history, None
 

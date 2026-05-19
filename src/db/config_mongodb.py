@@ -12,17 +12,44 @@ logger = logging.getLogger(__name__)
 
 
 class SemanticConfigMongoDb:
+    # ── Fallback data when MongoDB is not available ────────────────────────
+    _FALLBACK_TOKENS_DIFERENCIADORES = frozenset({
+        'customer', 'cliente', 'vendor', 'proveedor', 'employee', 'empleado',
+        'supplier', 'suministrador', 'home', 'casa', 'work', 'trabajo',
+        'office', 'oficina', 'venta', 'sale', 'costo', 'cost', 'compra', 'purchase',
+    })
+
+    _FALLBACK_TOKENS_IDENTIDAD = frozenset({
+        'uuid', 'cfdi', 'rfc', 'curp', 'clabe', 'iban', 'swift',
+        'sku', 'upc', 'ean', 'isbn', 'sat', 'timbre', 'id',
+    })
+
+    _FALLBACK_STOPWORDS = frozenset({
+        'cust', 'custbody', 'custentity', 'custrecord', 'custcol',
+        'mx', 'tb', 'pfr', 'field', 'sys', 'db', 'tbl',
+    })
+
+    _FALLBACK_GRUPOS = {
+        "email": frozenset({"correo", "mail", "email", "correo_electronico",
+                            "e-mail", "text_correo_250", "email_address", "user_email"}),
+        "telefono": frozenset({"phone", "tel", "fono", "telefono", "movil", "mobile", "celular"}),
+        "nombre": frozenset({"name", "nombre", "firstname", "given_name", "fullname", "first_name", "last_name"}),
+        "apellido": frozenset({"lastname", "surname", "apellido", "apellido_paterno", "apellido_materno"}),
+        "rfc": frozenset({"rfc", "tax_id", "taxid", "fiscal_id"}),
+        "customer_id": frozenset({"customer_id", "id_cliente", "cliente_id", "customerid",
+                                  "idcustomer", "client_id", "id_client", "customer", "cliente"}),
+        "postal_code": frozenset({"cp", "codigo_postal", "postal_code", "zip", "zipcode",
+                                  "zip_code", "cod_postal", "postal"}),
+        "date": frozenset({"date", "fecha", "fecha_nacimiento", "fecha_creacion",
+                           "fecha_modificacion", "fecha_alta", "fecha_emision"}),
+        "name": frozenset({"name", "nombre", "nombre_completo", "full_name",
+                           "first_name", "last_name", "apellido", "nombres"}),
+    }
+
     def __init__(self, connection_string: str = "mongodb://localhost:27017/", db_name: str = "semantic_model"):
-        self.client = MongoClient(connection_string)
-        self.db = self.client[db_name]
-
-        self.tokens_diferenciadores = self.db["tokens_diferenciadores"]
-        self.tokens_identidad = self.db["tokens_identidad"]
-        self.stopwords = self.db["stopwords"]
-        self.grupos_semanticos = self.db["grupos_semanticos"]
-        self.cambios_log = self.db["cambios_log"]
-
-        self._crear_indices()
+        self._connected = False
+        self._connection_string = connection_string
+        self._db_name = db_name
 
         # Cache para mejorar rendimiento
         self._cache_diferenciadores = None
@@ -31,10 +58,29 @@ class SemanticConfigMongoDb:
         self._cache_grupos = None
         self._cache_indice_semantico = None
 
-        #datos de entrenamiento dl modelo
-        self.training_datasets = self.db["training_datasets"]
-        self.training_pairs = self.db["training_pairs"]
-        self._crear_indices_entrenamiento()
+        try:
+            self.client = MongoClient(connection_string, serverSelectionTimeoutMS=3000)
+            self.client.admin.command('ping')
+            self._connected = True
+            self.db = self.client[db_name]
+
+            self.tokens_diferenciadores = self.db["tokens_diferenciadores"]
+            self.tokens_identidad = self.db["tokens_identidad"]
+            self.stopwords = self.db["stopwords"]
+            self.grupos_semanticos = self.db["grupos_semanticos"]
+            self.cambios_log = self.db["cambios_log"]
+
+            self._crear_indices()
+
+            self.training_datasets = self.db["training_datasets"]
+            self.training_pairs = self.db["training_pairs"]
+            self._crear_indices_entrenamiento()
+
+            logger.info(f"Conectado a MongoDB: {db_name}")
+        except Exception as e:
+            self._connected = False
+            self.client = None
+            logger.warning(f"MongoDB no disponible ({e}). Usando datos de respaldo embebidos.")
 
     def _crear_indices_entrenamiento(self):
         """Crear índices para las colecciones de entrenamiento"""
@@ -69,6 +115,10 @@ class SemanticConfigMongoDb:
                         version: str = "1.0",
                         metadata: dict = None,
                         sobrescribir: bool = False) -> str:
+        if not self._connected:
+            logger.warning("MongoDB no disponible. Dataset no guardado.")
+            return ""
+
         """
         Guardar un dataset de entrenamiento en MongoDB
 
@@ -176,16 +226,18 @@ class SemanticConfigMongoDb:
                        version: str = None,
                        balancear: bool = False,
                        max_negativos_ratio: float = 2.0,
-                       return_dicts: bool = False) -> list:  # Nuevo parámetro
+                       return_dicts: bool = False) -> list:
         """
         Cargar un dataset de entrenamiento desde MongoDB
 
         Args:
             return_dicts: Si True, devuelve lista de diccionarios, si False devuelve tuplas
         """
+        if not self._connected:
+            raise ConnectionError("MongoDB no está disponible")
+
         from bson.objectid import ObjectId
 
-        # Encontrar el dataset
         filtro = {"activo": True}
         if dataset_id:
             filtro["_id"] = ObjectId(dataset_id)
@@ -203,24 +255,19 @@ class SemanticConfigMongoDb:
 
         logger.info(f"Cargando dataset: {dataset['nombre']} v{dataset['version']}")
 
-        # Cargar pares
         cursor = self.training_pairs.find(
             {"dataset_id": dataset["_id"]},
             {"field_a": 1, "field_b": 1, "match": 1, "_id": 0}
         )
 
         if return_dicts:
-            # Devolver como diccionarios
             datos = list(cursor)
         else:
-            # Devolver como tuplas (formato original para entrenamiento)
             datos = [(doc["field_a"], doc["field_b"], doc["match"]) for doc in cursor]
 
-        # Balancear si se solicita
         if balancear and not return_dicts:
             datos = self._balancear_dataset(datos, max_negativos_ratio)
         elif balancear and return_dicts:
-            # Convertir a tuplas, balancear, y volver a diccionarios
             datos_tuplas = [(d["field_a"], d["field_b"], d["match"]) for d in datos]
             datos_tuplas = self._balancear_dataset(datos_tuplas, max_negativos_ratio)
             datos = [{"field_a": d[0], "field_b": d[1], "match": d[2]} for d in datos_tuplas]
@@ -330,6 +377,8 @@ class SemanticConfigMongoDb:
 
     def get_tokens_diferenciadores(self, refresh_cache: bool = False) -> Set[str]:
         """Obtener todos los tokens diferenciadores activos"""
+        if not self._connected:
+            return set(self._FALLBACK_TOKENS_DIFERENCIADORES)
         if self._cache_diferenciadores is None or refresh_cache:
             cursor = self.tokens_diferenciadores.find(
                 {"activo": True},
@@ -341,6 +390,8 @@ class SemanticConfigMongoDb:
 
     def get_tokens_identidad(self, refresh_cache: bool = False) -> Set[str]:
         """Obtener todos los tokens de identidad activos"""
+        if not self._connected:
+            return set(self._FALLBACK_TOKENS_IDENTIDAD)
         if self._cache_identidad is None or refresh_cache:
             cursor = self.tokens_identidad.find(
                 {"activo": True},
@@ -352,6 +403,8 @@ class SemanticConfigMongoDb:
 
     def get_stopwords(self, refresh_cache: bool = False) -> Set[str]:
         """Obtener todas las stopwords activas"""
+        if not self._connected:
+            return set(self._FALLBACK_STOPWORDS)
         if self._cache_stopwords is None or refresh_cache:
             cursor = self.stopwords.find(
                 {"activo": True},
@@ -363,6 +416,8 @@ class SemanticConfigMongoDb:
 
     def get_grupos_semanticos(self, refresh_cache: bool = False) -> Dict[str, Set[str]]:
         """Obtener todos los grupos semánticos"""
+        if not self._connected:
+            return {k: set(v) for k, v in self._FALLBACK_GRUPOS.items()}
         if self._cache_grupos is None or refresh_cache:
             pipeline = [
                 {"$match": {"activo": True}},
@@ -382,6 +437,12 @@ class SemanticConfigMongoDb:
         Obtener índice inverso: token -> grupo
         Útil para búsquedas rápidas de grupo semántico
         """
+        if not self._connected:
+            idx = {}
+            for grupo, tokens in self._FALLBACK_GRUPOS.items():
+                for token in tokens:
+                    idx[token] = grupo
+            return idx
         if self._cache_indice_semantico is None or refresh_cache:
             self._cache_indice_semantico = {}
             grupos = self.get_grupos_semanticos(refresh_cache)
@@ -427,18 +488,21 @@ class SemanticConfigMongoDb:
         self._cache_stopwords = None
         self._cache_grupos = None
         self._cache_indice_semantico = None
-        # Forzar recarga
-        self.get_tokens_diferenciadores()
-        self.get_tokens_identidad()
-        self.get_stopwords()
-        self.get_grupos_semanticos()
-        self.get_indice_semantico()
-        logger.info("Cache refrescado completamente")
+        if self._connected:
+            self.get_tokens_diferenciadores()
+            self.get_tokens_identidad()
+            self.get_stopwords()
+            self.get_grupos_semanticos()
+            self.get_indice_semantico()
+            logger.info("Cache refrescado completamente")
 
     # ── MÉTODOS ORIGINALES (sin cambios) ─────────────────────────────────────
 
     def add_token_diferenciador(self, token: str, categoria: str = None,
                                 notas: str = None, activo: bool = True):
+        if not self._connected:
+            logger.warning(f"MongoDB no disponible. Token '{token}' no persistido.")
+            return
         try:
             documento = {
                 "token": token.lower(),
@@ -452,7 +516,6 @@ class SemanticConfigMongoDb:
             self.tokens_diferenciadores.insert_one(documento)
             self._log_cambio("tokens_diferenciadores", "INSERT", token)
             logger.info(f"Token '{token}' agregado")
-            # Invalidar cache
             self._cache_diferenciadores = None
 
         except DuplicateKeyError:
@@ -470,6 +533,9 @@ class SemanticConfigMongoDb:
 
     def add_to_grupo_semantico(self, grupo: str, token: str,
                                idioma: str = "es", activo: bool = True):
+        if not self._connected:
+            logger.warning(f"MongoDB no disponible. Grupo '{grupo}'→'{token}' no persistido.")
+            return
         try:
             documento = {
                 "grupo": grupo,
@@ -481,7 +547,6 @@ class SemanticConfigMongoDb:
 
             self.grupos_semanticos.insert_one(documento)
             self._log_cambio("grupos_semanticos", "INSERT", token)
-            # Invalidar cache de grupos
             self._cache_grupos = None
             self._cache_indice_semantico = None
 
@@ -533,6 +598,8 @@ class SemanticConfigMongoDb:
 
     def _log_cambio(self, coleccion: str, accion: str, token: str = None,
                     detalles: dict = None):
+        if not self._connected:
+            return
         self.cambios_log.insert_one({
             "coleccion": coleccion,
             "accion": accion,
@@ -606,5 +673,91 @@ class SemanticConfigMongoDb:
         self.refresh_cache()
 
     def close(self):
-        self.client.close()
+        if self._connected and self.client:
+            self.client.close()
 
+
+# config_mongodb.py - Agrega esto al final del archivo (después del if __name__ == "__main__":)
+
+if __name__ == "__main__":
+    # Conectar a MongoDB
+    db = SemanticConfigMongoDb()
+
+    print("=" * 60)
+    print("🚀 CARGANDO GRUPOS SEMÁNTICOS DETECTADOS DEL LOG")
+    print("=" * 60)
+
+    # ============================================
+    # GRUPOS SEMÁNTICOS COMPLETOS (basados en el log)
+    # ============================================
+
+    grupos_semanticos = {
+        "customer_id": {
+            "tokens": [
+                "customer_id",
+                "id_cliente",
+                "cliente_id",
+                "customerid",
+                "idcustomer",
+                "client_id",
+                "id_client",
+                "customer",
+                "cliente"
+            ],
+            "idioma": "en"
+        },
+
+        "email": {
+            "tokens": [
+                "email",
+                "correo",
+                "mail",
+                "e-mail",
+                "text_correo_250",
+                "correo_electronico",
+                "email_address",
+                "user_email"
+            ],
+            "idioma": "en"
+        },
+
+        "postal_code": {
+            "tokens": [
+                "cp",
+                "codigo_postal",
+                "postal_code",
+                "zip",
+                "zipcode",
+                "zip_code",
+                "cod_postal",
+                "postal"
+            ],
+            "idioma": "en"
+        }
+    }
+
+    # ============================================
+    # EJECUTAR CARGA
+    # ============================================
+
+    total_grupos = 0
+    total_tokens = 0
+
+    print("\n📦 Cargando grupos semánticos...\n")
+
+    for grupo, config in grupos_semanticos.items():
+        tokens = config["tokens"]
+        idioma = config.get("idioma", "es")
+
+        for token in tokens:
+            try:
+                db.add_to_grupo_semantico(grupo, token, idioma=idioma, activo=True)
+                print(f"  ✅ {grupo:20} → {token}")
+                total_tokens += 1
+            except Exception as e:
+                print(f"  ❌ Error con {grupo}→{token}: {e}")
+
+        total_grupos += 1
+        print()
+
+    db.close()

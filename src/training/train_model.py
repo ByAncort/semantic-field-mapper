@@ -9,7 +9,6 @@ Soporta dos modos:
 """
 from __future__ import annotations
 import logging
-import sys
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,8 +16,8 @@ from sklearn.model_selection import train_test_split
 
 import src.config as config
 import src.db.config_mongodb as config_mongodb
-from cross_validator import model_validator, preparar_datos
-from ensemble_predictor import EnsembleConfig, EnsemblePredictor
+from src.training.cross_validator import model_validator, preparar_datos
+from src.training.ensemble_predictor import EnsembleConfig, EnsemblePredictor
 from src.data_training.gen_datos import generacion_datos
 
 logger = logging.getLogger(__name__)
@@ -58,7 +57,7 @@ def train_model(use_embeddings: bool = True):
     logger.info(f"Total de ejemplos: {len(train_data)}")
     X, y = preparar_datos(train_data, use_embeddings=use_embeddings)
     X_train, X_val, y_train, y_val = train_test_split(
-        X, y, test_size=0.2, random_state=42
+        X, y, test_size=0.5, random_state=42
     )
     logger.info(f"Train={len(X_train)}  Val={len(X_val)}  features={X.shape[1]}")
 
@@ -76,7 +75,7 @@ def train_model_semantic():
     - Contexto JSON (profundidad, tipo de objeto)
     - Arquitectura Siamesa mejorada con LSTM y atención
     """
-    from cross_validator import preparar_datos_semantico, model_validator_semantic
+    from src.training.cross_validator import preparar_datos_semantico, model_validator_semantic
 
     logger.info("🚀 Entrenando SEMANTIC MODEL (versión avanzada)…")
     logger.info("Generando datos de entrenamiento con features semánticos…")
@@ -236,7 +235,6 @@ def graficar_entrenamiento(historia, guardar_imagen: bool = True):
     return fig
 
 if __name__ == "__main__":
-    import sys
     logger.info("═" * 70)
     logger.info("  ENTRENAMIENTO DE MODELOS DE SIMILITUD SEMÁNTICA")
     logger.info("═" * 70)
@@ -244,7 +242,7 @@ if __name__ == "__main__":
     # historia, modelo, scaler = train_model(use_embeddings=True)
     logger.info("\nSEMANTIC MODEL")
     logger.info("   Características: LSTM + Atención + Features Semánticos + Contexto JSON")
-    historia, modelo, scaler = train_model_semantic()
+    historia, modelo, scaler = train_model()
 
     evaluar_post_entrenamiento()
     graficar_entrenamiento(historia)
